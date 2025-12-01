@@ -84,3 +84,6 @@ repos:
     rev: f999ae59ac949d9b57aaa5569c2d60eb846b3a00  # frozen: v1.7.7.24
     hooks:
       - id: actionlint
+        # Exclude downstream-consumer.yaml which intentionally has 11 inputs
+        # to demonstrate the 10-input limit that gerrit_json solves
+        exclude: "^.github/workflows/downstream-consumer.yaml$"

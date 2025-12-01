@@ -1,0 +1,6 @@
+# actionlint configuration
+# This downstream-consumer workflow intentionally has 11 inputs to demonstrate
+# the workflow_dispatch 10-input limitation that gerrit_json solves.
+self-hosted-runner:
+  # No custom labels for self-hosted runners
+  labels: []

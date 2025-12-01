@@ -1,0 +1,244 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# Manual workflow to test dispatching to downstream-consumer.yaml
+# This simulates what gerrit_to_platform does when it receives a Gerrit event
+# and dispatches to downstream workflows with gerrit_json
+
+name: "Manual Dispatch Test 🚀"
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+    inputs:
+      event_type:
+        description: 'Gerrit event type'
+        required: true
+        type: choice
+        options:
+          - patchset-created
+          - change-merged
+          - comment-added
+        default: 'patchset-created'
+      include_comment:
+        # yamllint disable-line rule:line-length
+        description: 'Include GERRIT_COMMENT field (for comment-added events)'
+        required: false
+        type: boolean
+        default: false
+      comment_text:
+        description: 'Comment text (if include_comment is true)'
+        required: false
+        type: string
+        default: 'gha-run test-workflow param=value'
+
+permissions: {}
+
+jobs:
+  generate-and-dispatch:
+    name: "Generate gerrit_json and dispatch"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write  # Needed to dispatch workflows
+    timeout-minutes: 10
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+
+      - name: "Setup Python"
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.11'
+
+      - name: "Install package"
+        shell: bash
+        run: |
+          echo "Installing gerrit_to_platform package..."
+          pip install -e .
+          echo "✓ Package installed"
+
+      - name: "Generate test data with gerrit_json"
+        id: generate
+        shell: bash
+        # yamllint disable rule:line-length
+        run: |
+          echo "Generating test Gerrit event data..."
+
+          # Generate using Python and build_gerrit_json function
+          python3 << 'PYEOF'
+          import json
+          import os
+          from gerrit_to_platform.helpers import build_gerrit_json
+
+          # Create realistic test data
+          event_type = "${{ inputs.event_type }}"
+          include_comment = "${{ inputs.include_comment }}" == "true"
+          comment_text = "${{ inputs.comment_text }}"
+
+          # Generate mock Gerrit data
+          inputs = {
+              'GERRIT_BRANCH': 'main',
+              'GERRIT_CHANGE_ID': 'I' + 'a' * 40,  # Mock Change-Id
+              'GERRIT_CHANGE_NUMBER': '99999',
+              'GERRIT_CHANGE_URL': \
+                  'https://gerrit.example.com/r/c/test-project/+/99999',
+              'GERRIT_EVENT_TYPE': event_type,
+              'GERRIT_PATCHSET_NUMBER': '5',
+              'GERRIT_PATCHSET_REVISION': 'f' * 40,  # Mock SHA
+              'GERRIT_PROJECT': 'test-project',
+              'GERRIT_REFSPEC': 'refs/changes/99/99999/5'
+          }
+
+          # Add comment if requested
+          if include_comment and event_type == 'comment-added':
+              inputs['GERRIT_COMMENT'] = comment_text
+
+          # Generate gerrit_json
+          gerrit_json = build_gerrit_json(inputs)
+
+          # Write individual variables to output
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write(f"GERRIT_BRANCH={inputs['GERRIT_BRANCH']}\n")
+              f.write(f"GERRIT_CHANGE_ID={inputs['GERRIT_CHANGE_ID']}\n")
+              f.write(f"GERRIT_CHANGE_NUMBER={inputs['GERRIT_CHANGE_NUMBER']}\n")
+              f.write(f"GERRIT_CHANGE_URL={inputs['GERRIT_CHANGE_URL']}\n")
+              f.write(f"GERRIT_EVENT_TYPE={inputs['GERRIT_EVENT_TYPE']}\n")
+              f.write(f"GERRIT_PATCHSET_NUMBER={inputs['GERRIT_PATCHSET_NUMBER']}\n")
+              f.write(f"GERRIT_PATCHSET_REVISION={inputs['GERRIT_PATCHSET_REVISION']}\n")
+              f.write(f"GERRIT_PROJECT={inputs['GERRIT_PROJECT']}\n")
+              f.write(f"GERRIT_REFSPEC={inputs['GERRIT_REFSPEC']}\n")
+              f.write(f"GERRIT_COMMENT={inputs.get('GERRIT_COMMENT', '')}\n")
+              f.write(f"gerrit_json={gerrit_json}\n")
+
+          print("Generated gerrit_json:")
+          print(json.dumps(json.loads(gerrit_json), indent=2))
+          PYEOF
+
+          echo "✓ Test data generated"
+
+      - name: "Display generated data"
+        shell: bash
+        run: |
+          SUMMARY="$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Generated Test Data"
+            echo ""
+            echo "### Event Type: ${{ inputs.event_type }}"
+            echo ""
+            echo "### gerrit_json (consolidated):"
+            echo '```json'
+            echo '${{ steps.generate.outputs.gerrit_json }}' | jq '.'
+            echo '```'
+            echo ""
+            echo "### Individual GERRIT_* variables:"
+            echo "- GERRIT_BRANCH: ${{ steps.generate.outputs.GERRIT_BRANCH }}"
+            echo "- GERRIT_CHANGE_NUMBER: ${{ steps.generate.outputs.GERRIT_CHANGE_NUMBER }}"
+            echo "- GERRIT_EVENT_TYPE: ${{ steps.generate.outputs.GERRIT_EVENT_TYPE }}"
+            echo "- GERRIT_PROJECT: ${{ steps.generate.outputs.GERRIT_PROJECT }}"
+          } >> "$SUMMARY"
+
+      - name: "Verify gerrit_json"
+        shell: bash
+        run: |
+          echo "Verifying generated gerrit_json..."
+          chmod +x examples/verify-json.sh examples/verify-json.py
+
+          JSON='${{ steps.generate.outputs.gerrit_json }}'
+
+          echo "Running Shell verification..."
+          ./examples/verify-json.sh "$JSON"
+
+          echo "Running Python verification..."
+          ./examples/verify-json.py "$JSON"
+
+          echo "✓ Verification passed"
+
+      - name: "Dispatch to downstream-consumer workflow"
+        # yamllint disable-line rule:line-length
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            const eventType = '${{ steps.generate.outputs.GERRIT_EVENT_TYPE }}';
+            const gerritJson = '${{ steps.generate.outputs.gerrit_json }}';
+
+            console.log('Dispatching to downstream-consumer workflow...');
+            console.log('Event type:', eventType);
+            console.log('gerrit_json:', gerritJson);
+
+            try {
+              const result = await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'downstream-consumer.yaml',
+                ref: context.ref,
+                inputs: {
+                  gerrit_json: gerritJson,
+                  GERRIT_BRANCH: '${{ steps.generate.outputs.GERRIT_BRANCH }}',
+                  GERRIT_CHANGE_ID: '${{ steps.generate.outputs.GERRIT_CHANGE_ID }}',
+                  GERRIT_CHANGE_NUMBER: '${{ steps.generate.outputs.GERRIT_CHANGE_NUMBER }}',
+                  GERRIT_CHANGE_URL: '${{ steps.generate.outputs.GERRIT_CHANGE_URL }}',
+                  GERRIT_EVENT_TYPE: '${{ steps.generate.outputs.GERRIT_EVENT_TYPE }}',
+                  GERRIT_PATCHSET_NUMBER: '${{ steps.generate.outputs.GERRIT_PATCHSET_NUMBER }}',
+                  GERRIT_PATCHSET_REVISION: '${{ steps.generate.outputs.GERRIT_PATCHSET_REVISION }}',
+                  GERRIT_PROJECT: '${{ steps.generate.outputs.GERRIT_PROJECT }}',
+                  GERRIT_REFSPEC: '${{ steps.generate.outputs.GERRIT_REFSPEC }}',
+                  GERRIT_COMMENT: '${{ steps.generate.outputs.GERRIT_COMMENT }}'
+                }
+              });
+
+              console.log('✓ Workflow dispatched successfully');
+              console.log('Status:', result.status);
+
+              core.summary
+                .addHeading('Workflow Dispatched Successfully ✅')
+                .addRaw('\n')
+                .addRaw('The downstream-consumer workflow has been triggered with:')
+                .addList([
+                  '1 gerrit_json consolidated variable',
+                  '10 individual GERRIT_* variables',
+                  `Event type: ${eventType}`
+                ])
+                .addRaw('\n')
+                .addRaw('Check the [Actions tab]' +
+                  '(../../actions/workflows/downstream-consumer.yaml) ' +
+                  'to see the results.')
+                .write();
+
+            } catch (error) {
+              console.error('❌ Failed to dispatch workflow:', error);
+              core.setFailed(error.message);
+              throw error;
+            }
+
+      - name: "Summary"
+        if: always()
+        shell: bash
+        run: |
+          SUMMARY="$GITHUB_STEP_SUMMARY"
+          {
+            echo ""
+            echo "## Summary"
+            echo ""
+            echo "This workflow demonstrates how gerrit_to_platform would:"
+            echo ""
+            echo "1. ✅ Receive a Gerrit hook event"
+            echo "2. ✅ Generate gerrit_json from GERRIT_* variables"
+            echo "3. ✅ Validate the generated JSON"
+            echo "4. ✅ Dispatch to downstream workflows with both formats"
+            echo ""
+            echo "### Key Points:"
+            echo ""
+            echo "- Passed **10 individual variables** (at workflow_dispatch limit)"
+            echo "- Passed **1 consolidated gerrit_json** variable"
+            echo "- Both formats contain identical data"
+            echo "- Downstream workflows can use either format during transition"
+          } >> "$SUMMARY"

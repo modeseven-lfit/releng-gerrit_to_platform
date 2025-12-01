@@ -1,0 +1,563 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# Action test/validation workflow
+name: "Test gerrit_json Generation 🧪"
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  repository-metadata:
+    name: "Repository Metadata"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2  # v2.13.2
+        with:
+          egress-policy: audit
+
+      # yamllint disable-line rule:line-length
+      - uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3  # v6.0.0
+        with:
+          fetch-depth: 0
+
+      - name: "Gather repository metadata"
+        id: repo-metadata
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/repository-metadata-action@5fd432a3a4593f838a8a51e39be81c9afb250e0b  # v0.1.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          generate_summary: 'false'
+          artifact_upload: 'true'
+          artifact_formats: 'json'
+
+  ### Test gerrit_json generation ###
+  test-json-generation:
+    name: "Test gerrit_json generation"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    outputs:
+      gerrit_json: ${{ steps.generate.outputs.gerrit_json }}
+    steps:
+      # Harden the runner used by this workflow
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+
+      - name: "Setup Python"
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.11'
+
+      - name: "Install package"
+        shell: bash
+        run: |
+          echo "Installing gerrit_to_platform package..."
+          pip install -e .
+          echo "✓ Package installed"
+
+      - name: "Generate gerrit_json from test data"
+        id: generate
+        shell: bash
+        run: |
+          echo "Generating gerrit_json using build_gerrit_json()..."
+
+          # Use Python to generate the JSON
+          GERRIT_JSON=$(python3 << 'EOF'
+          from gerrit_to_platform.helpers import build_gerrit_json
+
+          # Simulate a patchset-created event
+          inputs = {
+              'GERRIT_BRANCH': 'main',
+              'GERRIT_CHANGE_ID': 'I1234567890abcdef1234567890abcdef12345678',
+              'GERRIT_CHANGE_NUMBER': '12345',
+              'GERRIT_CHANGE_URL': \
+                  'https://gerrit.example.com/r/c/test-project/+/12345',
+              'GERRIT_EVENT_TYPE': 'patchset-created',
+              'GERRIT_PATCHSET_NUMBER': '3',
+              'GERRIT_PATCHSET_REVISION': \
+                  'abcdef1234567890abcdef1234567890abcdef12',
+              'GERRIT_PROJECT': 'test-project',
+              'GERRIT_REFSPEC': 'refs/changes/45/12345/3'
+          }
+
+          print(build_gerrit_json(inputs))
+          EOF
+          )
+
+          echo "Generated gerrit_json:"
+          echo "$GERRIT_JSON" | jq '.'
+
+          # Export to output (escape for GitHub Actions)
+          echo "gerrit_json=$GERRIT_JSON" >> "$GITHUB_OUTPUT"
+
+          echo "✓ gerrit_json generated successfully"
+
+      - name: "Verify JSON structure"
+        shell: bash
+        run: |
+          echo "Verifying generated JSON..."
+          GERRIT_JSON='${{ steps.generate.outputs.gerrit_json }}'
+
+          # Basic validation
+          echo "$GERRIT_JSON" | jq empty
+
+          # Check all required fields
+          REQUIRED_FIELDS=(
+            "branch" "change_id" "change_number" "change_url"
+            "event_type" "patchset_number" "patchset_revision"
+            "project" "refspec"
+          )
+
+          for field in "${REQUIRED_FIELDS[@]}"; do
+            if ! echo "$GERRIT_JSON" | jq -e ".$field" > /dev/null; then
+              echo "❌ Missing required field: $field"
+              exit 1
+            fi
+            echo "✓ Field present: $field"
+          done
+
+          echo "✓ All required fields present"
+
+      - name: "Display JSON summary"
+        shell: bash
+        run: |
+          SUMMARY="$GITHUB_STEP_SUMMARY"
+          SIZE=$(echo '${{ steps.generate.outputs.gerrit_json }}' | wc -c)
+          {
+            echo "## gerrit_json Generation Test"
+            echo ""
+            echo "Generated JSON:"
+            echo '```json'
+            echo '${{ steps.generate.outputs.gerrit_json }}' | jq '.'
+            echo '```'
+            echo ""
+            echo "Size: $SIZE bytes"
+          } >> "$SUMMARY"
+
+  ### Test Shell validation script ###
+  test-shell-validation:
+    name: "Test Shell validation (verify-json.sh)"
+    needs: test-json-generation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+
+      - name: "Test verify-json.sh with valid JSON"
+        shell: bash
+        run: |
+          echo "Testing verify-json.sh with generated gerrit_json..."
+          chmod +x examples/verify-json.sh
+          JSON='${{ needs.test-json-generation.outputs.gerrit_json }}'
+          ./examples/verify-json.sh "$JSON"
+          echo "✓ Shell validation passed"
+
+      - name: "Test verify-json.sh with invalid JSON (missing field)"
+        shell: bash
+        continue-on-error: true
+        id: invalid-test
+        run: |
+          echo "Testing validation with missing required field..."
+          ./examples/verify-json.sh \
+            '{"branch":"main","event_type":"patchset-created"}'
+
+      - name: "Verify validation caught error"
+        if: steps.invalid-test.outcome == 'success'
+        shell: bash
+        run: |
+          echo "❌ Validation should have failed for invalid JSON"
+          exit 1
+
+      - name: "Test verify-json.sh with invalid event_type"
+        shell: bash
+        continue-on-error: true
+        id: invalid-event
+        run: |
+          echo "Testing validation with invalid event_type..."
+          JSON='{"branch":"main","change_id":"I123","change_number":"1",'
+          JSON+='"change_url":"url","event_type":"invalid-type",'
+          JSON+='"patchset_number":"1","patchset_revision":"abc",'
+          JSON+='"project":"proj","refspec":"ref"}'
+          ./examples/verify-json.sh "$JSON"
+
+      - name: "Verify event_type validation"
+        if: steps.invalid-event.outcome == 'success'
+        shell: bash
+        run: |
+          echo "❌ Validation should have failed for invalid event_type"
+          exit 1
+
+      - name: "Shell validation summary"
+        shell: bash
+        run: |
+          SUMMARY="$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Shell Validation Tests"
+            echo ""
+            echo "✓ Valid JSON passed validation"
+            echo "✓ Invalid JSON correctly rejected"
+            echo "✓ Invalid event_type correctly rejected"
+          } >> "$SUMMARY"
+
+  ### Test Python validation script ###
+  test-python-validation:
+    name: "Test Python validation (verify-json.py)"
+    needs: test-json-generation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+
+      - name: "Setup Python"
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.11'
+
+      - name: "Test verify-json.py with valid JSON"
+        shell: bash
+        run: |
+          echo "Testing verify-json.py with generated gerrit_json..."
+          chmod +x examples/verify-json.py
+          JSON='${{ needs.test-json-generation.outputs.gerrit_json }}'
+          ./examples/verify-json.py "$JSON"
+          echo "✓ Python validation passed"
+
+      - name: "Test verify-json.py with invalid JSON (missing field)"
+        shell: bash
+        continue-on-error: true
+        id: invalid-test
+        run: |
+          echo "Testing validation with missing required field..."
+          ./examples/verify-json.py \
+            '{"branch":"main","event_type":"patchset-created"}'
+
+      - name: "Verify validation caught error"
+        if: steps.invalid-test.outcome == 'success'
+        shell: bash
+        run: |
+          echo "❌ Validation should have failed for invalid JSON"
+          exit 1
+
+      - name: "Test verify-json.py with invalid event_type"
+        shell: bash
+        continue-on-error: true
+        id: invalid-event
+        run: |
+          echo "Testing validation with invalid event_type..."
+          JSON='{"branch":"main","change_id":"I123","change_number":"1",'
+          JSON+='"change_url":"url","event_type":"invalid-type",'
+          JSON+='"patchset_number":"1","patchset_revision":"abc",'
+          JSON+='"project":"proj","refspec":"ref"}'
+          ./examples/verify-json.py "$JSON"
+
+      - name: "Verify event_type validation"
+        if: steps.invalid-event.outcome == 'success'
+        shell: bash
+        run: |
+          echo "❌ Validation should have failed for invalid event_type"
+          exit 1
+
+      - name: "Test with comment field (comment-added event)"
+        shell: bash
+        run: |
+          echo "Testing with optional comment field..."
+          JSON='{"branch":"main","change_id":"I123","change_number":"1",'
+          JSON+='"change_url":"url","event_type":"comment-added",'
+          JSON+='"patchset_number":"1","patchset_revision":"abc",'
+          JSON+='"project":"proj","refspec":"ref","comment":"gha-run test"}'
+          ./examples/verify-json.py "$JSON"
+          echo "✓ Comment field validation passed"
+
+      - name: "Python validation summary"
+        shell: bash
+        run: |
+          SUMMARY="$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Python Validation Tests"
+            echo ""
+            echo "✓ Valid JSON passed validation"
+            echo "✓ Invalid JSON correctly rejected"
+            echo "✓ Invalid event_type correctly rejected"
+            echo "✓ Optional comment field validated"
+          } >> "$SUMMARY"
+
+  ### Test downstream workflow consumption ###
+  test-downstream-consumer:
+    name: "Test as downstream workflow consumer"
+    needs: test-json-generation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+
+      - name: "Parse gerrit_json as downstream consumer"
+        id: parse
+        shell: bash
+        run: |
+          echo "Parsing gerrit_json as a downstream workflow would..."
+          JSON='${{ needs.test-json-generation.outputs.gerrit_json }}'
+          OUT="$GITHUB_OUTPUT"
+
+          # Extract fields using jq
+          {
+            echo "branch=$(echo "$JSON" | jq -r '.branch')"
+            echo "change_number=$(echo "$JSON" | jq -r '.change_number')"
+            echo "change_id=$(echo "$JSON" | jq -r '.change_id')"
+            echo "event_type=$(echo "$JSON" | jq -r '.event_type')"
+            echo "refspec=$(echo "$JSON" | jq -r '.refspec')"
+            echo "project=$(echo "$JSON" | jq -r '.project')"
+          } >> "$OUT"
+
+          echo "✓ Successfully parsed all fields"
+
+      - name: "Verify parsed values"
+        shell: bash
+        run: |
+          echo "Parsed values:"
+          echo "  Branch: ${{ steps.parse.outputs.branch }}"
+          echo "  Change Number: ${{ steps.parse.outputs.change_number }}"
+          echo "  Change ID: ${{ steps.parse.outputs.change_id }}"
+          echo "  Event Type: ${{ steps.parse.outputs.event_type }}"
+          echo "  Refspec: ${{ steps.parse.outputs.refspec }}"
+          echo "  Project: ${{ steps.parse.outputs.project }}"
+
+          # Verify expected values
+          if [ "${{ steps.parse.outputs.branch }}" != "main" ]; then
+            echo "❌ Branch mismatch"
+            exit 1
+          fi
+
+          if [ "${{ steps.parse.outputs.change_number }}" != "12345" ]; then
+            echo "❌ Change number mismatch"
+            exit 1
+          fi
+
+          EVENT="${{ steps.parse.outputs.event_type }}"
+          if [ "$EVENT" != "patchset-created" ]; then
+            echo "❌ Event type mismatch"
+            exit 1
+          fi
+
+          echo "✓ All parsed values match expected values"
+
+      - name: "Simulate workflow actions using parsed data"
+        shell: bash
+        run: |
+          echo "Simulating typical workflow actions..."
+          BRANCH="${{ steps.parse.outputs.branch }}"
+          echo "Would checkout branch: $BRANCH"
+          echo "Would fetch refspec: ${{ steps.parse.outputs.refspec }}"
+          echo "Would process change: ${{ steps.parse.outputs.change_number }}"
+          echo "Event type: ${{ steps.parse.outputs.event_type }}"
+          echo ""
+          echo "✓ Successfully demonstrated downstream consumption"
+
+      - name: "Downstream consumer summary"
+        shell: bash
+        run: |
+          SUMMARY="$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Downstream Consumer Test"
+            echo ""
+            echo "Successfully consumed gerrit_json as a downstream workflow:"
+            echo ""
+            echo "| Field | Value |"
+            echo "|-------|-------|"
+            echo "| Branch | ${{ steps.parse.outputs.branch }} |"
+            echo "| Change | ${{ steps.parse.outputs.change_number }} |"
+            echo "| Event | ${{ steps.parse.outputs.event_type }} |"
+            echo "| Project | ${{ steps.parse.outputs.project }} |"
+          } >> "$SUMMARY"
+
+  ### Test multiple event types ###
+  test-multiple-events:
+    name: "Test all event types"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        event:
+          - type: patchset-created
+            has_comment: false
+          - type: change-merged
+            has_comment: false
+          - type: comment-added
+            has_comment: true
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+
+      - name: "Setup Python"
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: '3.11'
+
+      - name: "Install package"
+        shell: bash
+        run: pip install -e .
+
+      - name: "Generate JSON for ${{ matrix.event.type }}"
+        shell: bash
+        run: |
+          echo "Testing event type: ${{ matrix.event.type }}"
+
+          GERRIT_JSON=$(python3 << 'EOF'
+          from gerrit_to_platform.helpers import build_gerrit_json
+
+          inputs = {
+              'GERRIT_BRANCH': 'main',
+              'GERRIT_CHANGE_ID': 'I1234567890abcdef1234567890abcdef12345678',
+              'GERRIT_CHANGE_NUMBER': '12345',
+              'GERRIT_CHANGE_URL': \
+                  'https://gerrit.example.com/r/c/test-project/+/12345',
+              'GERRIT_EVENT_TYPE': '${{ matrix.event.type }}',
+              'GERRIT_PATCHSET_NUMBER': '3',
+              'GERRIT_PATCHSET_REVISION': \
+                  'abcdef1234567890abcdef1234567890abcdef12',
+              'GERRIT_PROJECT': 'test-project',
+              'GERRIT_REFSPEC': 'refs/changes/45/12345/3'
+          }
+
+          if '${{ matrix.event.has_comment }}' == 'true':
+              inputs['GERRIT_COMMENT'] = 'gha-run test-workflow param=value'
+
+          print(build_gerrit_json(inputs))
+          EOF
+          )
+
+          echo "Generated JSON:"
+          echo "$GERRIT_JSON" | jq '.'
+
+          # Validate with both scripts
+          echo "Validating with Shell script..."
+          chmod +x examples/verify-json.sh
+          ./examples/verify-json.sh "$GERRIT_JSON"
+
+          echo "Validating with Python script..."
+          chmod +x examples/verify-json.py
+          ./examples/verify-json.py "$GERRIT_JSON"
+
+          echo "✓ Event type ${{ matrix.event.type }} validated successfully"
+
+  ### Final summary ###
+  test-summary:
+    name: "Test Summary"
+    needs:
+      - test-json-generation
+      - test-shell-validation
+      - test-python-validation
+      - test-downstream-consumer
+      - test-multiple-events
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: "Check test results"
+        shell: bash
+        # yamllint disable rule:line-length
+        run: |
+          SUMMARY="$GITHUB_STEP_SUMMARY"
+          {
+            echo "## 🎉 gerrit_json Testing Complete"
+            echo ""
+            echo "### Test Results:"
+            echo ""
+            echo "- ✅ JSON Generation: ${{ needs.test-json-generation.result }}"
+            echo "- ✅ Shell Validation: ${{ needs.test-shell-validation.result }}"
+            echo "- ✅ Python Validation: ${{ needs.test-python-validation.result }}"
+            echo "- ✅ Downstream Consumer: ${{ needs.test-downstream-consumer.result }}"
+            echo "- ✅ Multiple Event Types: ${{ needs.test-multiple-events.result }}"
+            echo ""
+            echo "### Key Features Tested:"
+            echo ""
+            echo "1. ✅ JSON generation from GERRIT_* variables"
+            echo "2. ✅ Shell script validation (verify-json.sh)"
+            echo "3. ✅ Python script validation (verify-json.py)"
+            echo "4. ✅ Downstream workflow consumption"
+            echo "5. ✅ All three event types (patchset-created, change-merged, comment-added)"
+            echo "6. ✅ Optional comment field handling"
+            echo "7. ✅ Invalid input rejection"
+          } >> "$SUMMARY"
+
+          # Fail if any required job failed
+          if [ "${{ needs.test-json-generation.result }}" != "success" ] || \
+             [ "${{ needs.test-shell-validation.result }}" != "success" ] || \
+             [ "${{ needs.test-python-validation.result }}" != \
+               "success" ] || \
+             [ "${{ needs.test-downstream-consumer.result }}" != \
+               "success" ] || \
+             [ "${{ needs.test-multiple-events.result }}" != "success" ]; then
+            {
+              echo ""
+              echo "❌ Some tests failed. Please review the logs above."
+            } >> "$SUMMARY"
+            exit 1
+          fi
+
+          {
+            echo ""
+            echo "✅ All tests passed successfully!"
+          } >> "$SUMMARY"
